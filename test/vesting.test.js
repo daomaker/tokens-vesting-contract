@@ -13,16 +13,17 @@ describe("Vesting testing", function() {
   let deployer, beneficiary
 
   it("Deploys Vesting contract", async () => {
-    [deployer, beneficiary] = await ethers.getSigners();
+    [deployer, beneficiary, revoker] = await ethers.getSigners();
 
     this.token = await deployContract("ERC20Mock", [deployer.address])
     this.vesting = await deployContract("TokensVesting", [
       this.token.address,
       beneficiary.address,
       (parseInt(await time.latest()) + 100).toString(), // Start after 100 seconds
-      '100', // Cliff 100 seconds
       time.duration.weeks('10').toString(), // Releases delay
       '4',  // Releases count
+      true, // Revokable
+      revoker.address // Revoker address
     ])
 
     await this.token.transfer(this.vesting.address, ethers.utils.parseEther("100"))
@@ -35,12 +36,15 @@ describe("Vesting testing", function() {
     let vestingBalance = await this.token.balanceOf(this.vesting.address)
     expect(vestingBalance).to.equal(ethers.utils.parseEther("100"))
 
+    let revokerAddr = await this.vesting.revoker()
+    expect(revokerAddr).to.equal(revoker.address)
+
     // Try to claim should be failed
     await expectRevert(this.vesting.release(), "release: No tokens are due!")
+    await expectRevert(this.vesting.revoke(revokerAddr), "revoke: unauthorized sender!")
 
     // Increase to first release
     await time.increase(parseInt(time.duration.weeks('11')))
-
 
     await this.vesting.connect(beneficiary).release()
 
@@ -50,10 +54,10 @@ describe("Vesting testing", function() {
     vestingBalance = await this.token.balanceOf(this.vesting.address)
     expect(vestingBalance).to.equal(ethers.utils.parseEther("75"))
 
+    // Increase to second release and revoke
+    await time.increase(parseInt(time.duration.weeks('10')))
 
-    // Increase to last release
-    await time.increase(parseInt(time.duration.weeks('110')))
-
+    await this.vesting.connect(revoker).revoke(beneficiary.address)
     await this.vesting.connect(beneficiary).release()
 
     beneficiaryBalance = await this.token.balanceOf(beneficiary.address)

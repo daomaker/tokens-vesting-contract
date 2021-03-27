@@ -9,69 +9,126 @@ import "@openzeppelin/contracts/math/SafeMath.sol";
 /**
  * @title TokensVesting
  * @dev A token holder contract that can release its token balance gradually like a
- * typical vesting scheme, with a cliff and vesting period.
+ * typical vesting scheme.
  */
 contract TokensVesting {
-  using SafeMath for uint256;
-  using SafeERC20 for IERC20;
+    using SafeMath for uint256;
+    using SafeERC20 for IERC20;
 
-  // Durations and timestamps are expressed in UNIX time
-  uint256 public start;
-  uint256 public finish;
-  uint256 public cliff;
-  uint256 public releasePeriod;
-  uint256 public releaseCount;
-  uint256 public released;
+    event TokensReleased(uint256 amount);
+    event TokensVestingRevoked(address receiver, uint256 amount);
 
-  // Beneficiary of tokens after they are released
-  address payable public beneficiary;
+    // beneficiary of tokens after they are released
+    address private _beneficiary;
 
-  // Token interface
-  IERC20 public token;
+    // Durations and timestamps are expressed in UNIX time, the same units as block.timestamp.
+    uint256 private _start;
+    uint256 private _finish;
+    uint256 private _duration;
+    uint256 private _releasesCount;
+    uint256 private _released;
 
-  event TokensReleased(uint256 amount);
+    address private _revoker;
+    bool private _revocable;
+    bool private _revoked;
+
+    IERC20 private _token;
+
+    /**
+     * @dev Creates a vesting contract that vests its balance of any ERC20 token to the
+     * beneficiary, gradually in a linear fashion until start + duration. By then all
+     * of the balance will have vested.
+     * @param token address of the token which should be vested
+     * @param beneficiary address of the beneficiary to whom vested tokens are transferred
+     * @param start the time (as Unix time) at which point vesting starts
+     * @param duration duration in seconds of each release
+     * @param revocable whether the vesting is revocable or not
+     * @param revoker address who can revoke funds
+     */
+    constructor (address token, address beneficiary, uint256 start, uint256 duration, uint256 releasesCount, bool revocable, address revoker) public {
+        require(beneficiary != address(0), "TokensVesting: beneficiary is the zero address!");
+        require(token != address(0), "TokensVesting: token is the zero address!");
+        require(revoker != address(0), "TokensVesting: revoker is the zero address!");
+        require(duration > 0, "TokensVesting: duration is 0!");
+        require(releasesCount > 0, "TokensVesting: releases count is 0!");
+        require(start.add(duration) > block.timestamp, "TokensVesting: final time is before current time!");
+
+        _token = IERC20(token);
+        _beneficiary = beneficiary;
+        _revocable = revocable;
+        _duration = duration;
+        _releasesCount = releasesCount;
+        _start = start;
+        _finish = _start.add(_releasesCount.mul(_duration));
+
+        _revoker = revoker;
+    }
 
 
+    // -----------------------------------------------------------------------
+	// GETTERS
 	// -----------------------------------------------------------------------
-	// CONSTRUCTOR
-	// -----------------------------------------------------------------------
 
 
-  /**
-   * @dev Creates a vesting contract that vests its balance of any ERC20 token to the
-   * beneficiary, gradually in a linear fashion until start + duration. By then all
-   * of the balance will have vested.
-   * @param _token address of the token which should be vested
-   * @param _beneficiary address to whom vested tokens are transferred
-   * @param _start the time (as Unix time) at which point vesting starts
-   * @param _cliff (in seconds) until which vesting should be paused
-   * @param _releasePeriod (in seconds) it should represent the periods (ex: release should be once per 1 month, 3 month and etc)
-   * @param _releaseCount the count of periods, during which beneficiary can release tokens (ex: "12" if 1 year and only once per month)
-   */
-  constructor (
-    address _token,
-    address payable _beneficiary,
-    uint256 _start,
-    uint256 _cliff,
-    uint256 _releasePeriod,
-    uint256 _releaseCount
-  ) public {
-    require(_beneficiary != address(0), "Vesting: beneficiary is the zero address");
-    require(_start > block.timestamp, "Vesting: vesting should be start in future");
-    require(_releaseCount != 0, "Vesting: the vesting contract should have minimum one release");
-    require(_releasePeriod != 0, "Vesting: release duration should be bigger than 0");
+    /**
+     * @return the beneficiary of the tokens.
+     */
+    function beneficiary() public view returns (address) {
+        return _beneficiary;
+    }
 
-    start = _start;
-    cliff = _cliff;
-    token = IERC20(_token);
-    beneficiary = _beneficiary;
-    releaseCount = _releaseCount;
-    releasePeriod = _releasePeriod;
-    finish = start.add(cliff).add(releaseCount.mul(releasePeriod));
-  }
+    /**
+     * @return the start time of the token vesting.
+     */
+    function start() public view returns (uint256) {
+        return _start;
+    }
 
-  fallback () external payable {}
-  receive () external payable {}
+    /**
+     * @return the finish time of the token vesting.
+     */
+    function finish() public view returns (uint256) {
+        return _finish;
+    }
+
+    /**
+     * @return the duration of the token vesting.
+     */
+    function duration() public view returns (uint256) {
+        return _duration;
+    }
+
+    /**
+     * @return true if the vesting is revocable.
+     */
+    function revocable() public view returns (bool) {
+        return _revocable;
+    }
+
+    /**
+     * @return the amount of the token released.
+     */
+    function released() public view returns (uint256) {
+        return _released;
+    }
+
+    /**
+     * @return true if the token is revoked.
+     */
+    function revoked() public view returns (bool) {
+        return _revoked;
+    }
+
+    /**
+     * @return address, who allowed to revoke.
+     */
+    function revoker() public view returns (address) {
+        return _revoker;
+    }
+
+    function getAvailableTokens() public view returns (uint256) {
+        return _releasableAmount();
+    }
 
 
 	// -----------------------------------------------------------------------
@@ -79,29 +136,38 @@ contract TokensVesting {
 	// -----------------------------------------------------------------------
 
 
-  /**
-   * @notice Transfers vested tokens to beneficiary.
-   */
-  function release() external {
-    uint256 unreleased = _releasableAmount();
-    require(unreleased > 0, "release: No tokens are due!");
-    require(msg.sender == beneficiary, "release: Only beneficiary can release tokens!");
+    /**
+     * @notice Transfers vested tokens to beneficiary.
+     */
+    function release() public {
+        uint256 unreleased = _releasableAmount();
+        require(unreleased > 0, "release: No tokens are due!");
 
-    released = released.add(unreleased);
-    token.safeTransfer(beneficiary, unreleased);
+        _released = _released.add(unreleased);
+        _token.safeTransfer(_beneficiary, unreleased);
 
-    emit TokensReleased(unreleased);
-  }
+        emit TokensReleased(unreleased);
+    }
 
+    /**
+     * @notice Allows the owner to revoke the vesting. Tokens already vested
+     * remain in the contract, the rest are returned to the owner.
+     * @param receiver Address who should receive tokens
+     */
+    function revoke(address receiver) public {
+        require(msg.sender == _revoker, "revoke: unauthorized sender!");
+        require(_revocable, "revoke: cannot revoke!");
+        require(!_revoked, "revoke: token already revoked!");
 
-	// -----------------------------------------------------------------------
-	// GETTERS
-	// -----------------------------------------------------------------------
+        uint256 balance = _token.balanceOf(address(this));
+        uint256 unreleased = _releasableAmount();
+        uint256 refund = balance.sub(unreleased);
 
+        _revoked = true;
+        _token.safeTransfer(receiver, refund);
 
-  function getAvailableTokens() external view returns (uint256) {
-    return _releasableAmount();
-  }
+        emit TokensVestingRevoked(receiver, refund);
+    }
 
 
 	// -----------------------------------------------------------------------
@@ -109,31 +175,30 @@ contract TokensVesting {
 	// -----------------------------------------------------------------------
 
 
-  /**
-   * @dev Calculates the amount that has already vested but hasn't been released yet.
-   */
-  function _releasableAmount() private view returns (uint256) {
-    return _vestedAmount().sub(released);
-  }
-
-  /**
-   * @dev Calculates the amount that has already vested.
-   */
-  function _vestedAmount() private view returns (uint256) {
-    uint256 currentBalance = token.balanceOf(address(this));
-    uint256 totalBalance = currentBalance.add(released);
-
-    if (block.timestamp < start.add(cliff)) {
-      return 0;
-    } else if (block.timestamp >= finish) {
-      return totalBalance;
-    } else {
-      uint256 vestingStartTime = start.add(cliff);
-      uint256 timeLeftAfterStart = block.timestamp.sub(vestingStartTime);
-      uint256 availableReleases = timeLeftAfterStart.div(releasePeriod);
-      uint256 tokensPerRelease = totalBalance.div(releaseCount);
-
-      return availableReleases.mul(tokensPerRelease);
+    /**
+     * @dev Calculates the amount that has already vested but hasn't been released yet.
+     */
+    function _releasableAmount() private view returns (uint256) {
+        return _vestedAmount().sub(_released);
     }
-  }
+
+    /**
+     * @dev Calculates the amount that has already vested.
+     */
+    function _vestedAmount() private view returns (uint256) {
+        uint256 currentBalance = _token.balanceOf(address(this));
+        uint256 totalBalance = currentBalance.add(_released);
+
+        if (block.timestamp < _start) {
+            return 0;
+        } else if (block.timestamp >= _finish || _revoked) {
+            return totalBalance;
+        } else {
+            uint256 timeLeftAfterStart = block.timestamp.sub(_start);
+            uint256 availableReleases = timeLeftAfterStart.div(_duration);
+            uint256 tokensPerRelease = totalBalance.div(_releasesCount);
+
+            return availableReleases.mul(tokensPerRelease);
+        }
+    }
 }
